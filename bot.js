@@ -298,19 +298,10 @@ bot.onText(/\/start/, async (msg) => {
     
     if (!isActivated) {
         bot.sendMessage(msg.chat.id, 
-            "🤖 **Welcome to XVideo Bot!**\n\n" +
+            "🤖 **Welcome to Dayaka Sabawa Bot!**\n\n" +
             "📝 Your account has been registered successfully!\n" +
             "⏳ Please wait for admin approval to start using the bot.\n\n" +
-            "🚫 **Access Status:** Pending Activation\n\n" +
-            "Contact admin for faster activation:",
-            {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [[
-                        { text: "👨‍💻 Contact Admin", url: `tg://user?id=${ADMIN_ID}` }
-                    ]]
-                }
-            }
+            "🚫 **Access Status:** Pending Activation\n\n",
         );
         
         // Notify admin about new registration
@@ -327,7 +318,7 @@ bot.onText(/\/start/, async (msg) => {
     }
     
     const welcomeMessage = `
-🎬 **Welcome to XVideo Bot!**
+🎬 **Welcome to Dayaka Sabawa Bot!**
 
 ✅ **Account Status:** Activated
 
@@ -552,7 +543,7 @@ bot.onText(/\/help/, async (msg) => {
     }
     
     const helpMessage = `
-📖 **XVideo Bot Help**
+📖 **Dayaka Sabawa Bot Help**
 
 **🔍 Search Videos:**
 \`/search <keyword>\` - Search for videos
