@@ -8,7 +8,7 @@ const { MongoClient } = require('mongodb');
 // Bot configuration
 const BOT_TOKEN = '8415938335:AAGgeow6Non1VkLYdC8fm9iq6YCGSlUZp8A';
 const ADMIN_ID = "2034210940";
-const MONGODB_URI = 'mongodb+srv://productionskod:AHH2AmFQbhWcXEks@cluster0.si2rf.mongodb.net/xvideo_bot';
+const MONGODB_URI = 'mongodb+srv://productionskod:AHH2AmFQbhWcXEks@cluster0.si2rf.mongodb.net/xvideo_bot_v1';
 
 // Initialize bot
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -73,20 +73,27 @@ async function registerUser(userId, userInfo) {
             lastActiveAt: new Date()
         };
         
-        const result = await usersCollection.updateOne(
-            { userId: userId.toString() },
-            { 
-                $setOnInsert: user, 
-                $set: { 
-                    lastActiveAt: new Date(),
-                    // Update user info if they changed their name/username
-                    username: userInfo.username || null,
-                    firstName: userInfo.first_name || null,
-                    lastName: userInfo.last_name || null
-                } 
-            },
-            { upsert: true }
-        );
+        // Check if user exists first
+        const existingUser = await usersCollection.findOne({ userId: userId.toString() });
+        
+        let result;
+        if (existingUser) {
+            // Update existing user
+            result = await usersCollection.updateOne(
+                { userId: userId.toString() },
+                { 
+                    $set: { 
+                        lastActiveAt: new Date(),
+                        username: userInfo.username || null,
+                        firstName: userInfo.first_name || null,
+                        lastName: userInfo.last_name || null
+                    } 
+                }
+            );
+        } else {
+            // Insert new user
+            result = await usersCollection.insertOne(user);
+        }
         
         console.log(`👤 User registration: ${userId} - ${result.upsertedCount ? 'New user' : 'Existing user updated'}`);
         return user;
