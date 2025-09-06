@@ -14,50 +14,81 @@ const MONGODB_URI = 'mongodb+srv://productionskod:AHH2AmFQbhWcXEks@cluster0.si2r
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // MongoDB connection
+let client;
 let db;
 let usersCollection;
 let searchCacheCollection;
 
-// Initialize MongoDB
+// Initialize MongoDB with proper error handling
 async function initMongoDB() {
     try {
-        const client = new MongoClient(MONGODB_URI);
+        client = new MongoClient(MONGODB_URI, {
+            useUnifiedTopology: true,
+            serverSelectionTimeoutMS: 5000,
+            connectTimeoutMS: 10000,
+        });
+        
         await client.connect();
-        db = client.db();
+        console.log('📡 Connecting to MongoDB...');
+        
+        // Test the connection
+        await client.db("admin").command({ ping: 1 });
+        
+        db = client.db('xvideo_bot');
         usersCollection = db.collection('users');
         searchCacheCollection = db.collection('search_cache');
         
         // Create indexes for better performance
-        await usersCollection.createIndex({ userId: 1 }, { unique: true });
-        await searchCacheCollection.createIndex({ userId: 1 });
-        await searchCacheCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 }); // Expire after 1 hour
+        try {
+            await usersCollection.createIndex({ userId: 1 }, { unique: true });
+            await searchCacheCollection.createIndex({ userId: 1 });
+            await searchCacheCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3600 });
+            console.log('📝 Database indexes created successfully');
+        } catch (indexError) {
+            console.log('ℹ️ Indexes already exist or error creating:', indexError.message);
+        }
         
         console.log('✅ MongoDB connected successfully');
+        return true;
     } catch (error) {
         console.error('❌ MongoDB connection error:', error);
-        process.exit(1);
+        return false;
     }
 }
 
-// User management functions
+// Enhanced user management functions with better error handling
 async function registerUser(userId, userInfo) {
     try {
+        if (!usersCollection) {
+            throw new Error('Database not initialized');
+        }
+
         const user = {
-            userId: userId,
+            userId: userId.toString(),
             username: userInfo.username || null,
             firstName: userInfo.first_name || null,
             lastName: userInfo.last_name || null,
-            isActivated: false,
+            isActivated: userId.toString() === ADMIN_ID, // Auto-activate admin
             registeredAt: new Date(),
             lastActiveAt: new Date()
         };
         
-        await usersCollection.updateOne(
-            { userId: userId },
-            { $setOnInsert: user, $set: { lastActiveAt: new Date() } },
+        const result = await usersCollection.updateOne(
+            { userId: userId.toString() },
+            { 
+                $setOnInsert: user, 
+                $set: { 
+                    lastActiveAt: new Date(),
+                    // Update user info if they changed their name/username
+                    username: userInfo.username || null,
+                    firstName: userInfo.first_name || null,
+                    lastName: userInfo.last_name || null
+                } 
+            },
             { upsert: true }
         );
         
+        console.log(`👤 User registration: ${userId} - ${result.upsertedCount ? 'New user' : 'Existing user updated'}`);
         return user;
     } catch (error) {
         console.error('Error registering user:', error);
@@ -66,10 +97,14 @@ async function registerUser(userId, userInfo) {
 }
 
 async function isUserActivated(userId) {
-    if (userId === ADMIN_ID) return true;
+    if (userId.toString() === ADMIN_ID) return true;
     
     try {
-        const user = await usersCollection.findOne({ userId: userId });
+        if (!usersCollection) {
+            return false;
+        }
+        
+        const user = await usersCollection.findOne({ userId: userId.toString() });
         return user && user.isActivated;
     } catch (error) {
         console.error('Error checking user activation:', error);
@@ -79,11 +114,17 @@ async function isUserActivated(userId) {
 
 async function activateUser(userId) {
     try {
-        await usersCollection.updateOne(
-            { userId: userId },
+        if (!usersCollection) {
+            throw new Error('Database not initialized');
+        }
+        
+        const result = await usersCollection.updateOne(
+            { userId: userId.toString() },
             { $set: { isActivated: true, activatedAt: new Date() } }
         );
-        return true;
+        
+        console.log(`✅ User activated: ${userId}`);
+        return result.matchedCount > 0;
     } catch (error) {
         console.error('Error activating user:', error);
         return false;
@@ -92,11 +133,22 @@ async function activateUser(userId) {
 
 async function deactivateUser(userId) {
     try {
-        await usersCollection.updateOne(
-            { userId: userId },
+        if (!usersCollection) {
+            throw new Error('Database not initialized');
+        }
+        
+        // Don't allow deactivating admin
+        if (userId.toString() === ADMIN_ID) {
+            return false;
+        }
+        
+        const result = await usersCollection.updateOne(
+            { userId: userId.toString() },
             { $set: { isActivated: false, deactivatedAt: new Date() } }
         );
-        return true;
+        
+        console.log(`❌ User deactivated: ${userId}`);
+        return result.matchedCount > 0;
     } catch (error) {
         console.error('Error deactivating user:', error);
         return false;
@@ -105,6 +157,9 @@ async function deactivateUser(userId) {
 
 async function getAllUsers() {
     try {
+        if (!usersCollection) {
+            return [];
+        }
         return await usersCollection.find({}).sort({ registeredAt: -1 }).toArray();
     } catch (error) {
         console.error('Error getting users:', error);
@@ -114,6 +169,9 @@ async function getAllUsers() {
 
 async function getActivatedUsers() {
     try {
+        if (!usersCollection) {
+            return [];
+        }
         return await usersCollection.find({ isActivated: true }).toArray();
     } catch (error) {
         console.error('Error getting activated users:', error);
@@ -121,14 +179,18 @@ async function getActivatedUsers() {
     }
 }
 
-// Search cache functions
+// Search cache functions with better error handling
 async function cacheSearchResults(userId, keyword, results) {
     try {
+        if (!searchCacheCollection) {
+            return;
+        }
+        
         await searchCacheCollection.updateOne(
-            { userId: userId },
+            { userId: userId.toString() },
             {
                 $set: {
-                    userId: userId,
+                    userId: userId.toString(),
                     keyword: keyword,
                     results: results,
                     currentPage: 0,
@@ -144,7 +206,10 @@ async function cacheSearchResults(userId, keyword, results) {
 
 async function getSearchResults(userId) {
     try {
-        return await searchCacheCollection.findOne({ userId: userId });
+        if (!searchCacheCollection) {
+            return null;
+        }
+        return await searchCacheCollection.findOne({ userId: userId.toString() });
     } catch (error) {
         console.error('Error getting search results:', error);
         return null;
@@ -153,8 +218,11 @@ async function getSearchResults(userId) {
 
 async function updateSearchPage(userId, page) {
     try {
+        if (!searchCacheCollection) {
+            return;
+        }
         await searchCacheCollection.updateOne(
-            { userId: userId },
+            { userId: userId.toString() },
             { $set: { currentPage: page } }
         );
     } catch (error) {
@@ -177,7 +245,10 @@ async function downloadFile(url, filename) {
             method: 'GET',
             url: url,
             responseType: 'stream',
-            timeout: 300000 // 5 minutes timeout
+            timeout: 300000, // 5 minutes timeout
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         });
         
         const writer = fs.createWriteStream(filename);
@@ -196,7 +267,6 @@ async function downloadFile(url, filename) {
 function createPaginationKeyboard(searchData) {
     const { results, currentPage } = searchData;
     const keyboard = [];
-    const buttonsPerRow = 1;
     const startIndex = currentPage * 10;
     const totalPages = Math.ceil(results.length / 10);
     
@@ -286,38 +356,65 @@ function createUserManagementKeyboard(users, page = 0) {
 
 // Bot command handlers
 
-// Start command - Register user
+// Start command - Register user with enhanced error handling
 bot.onText(/\/start/, async (msg) => {
     const userId = msg.from.id.toString();
     const userInfo = msg.from;
     
-    // Register user in database
-    await registerUser(userId, userInfo);
-    
-    const isActivated = await isUserActivated(userId);
-    
-    if (!isActivated) {
-        bot.sendMessage(msg.chat.id, 
-            "🤖 **Welcome to Dayaka Sabawa Bot!**\n\n" +
-            "📝 Your account has been registered successfully!\n" +
-            "⏳ Please wait for admin approval to start using the bot.\n\n" +
-            "🚫 **Access Status:** Pending Activation\n\n",
-        );
+    try {
+        console.log(`🚀 Start command from user: ${userId} (${userInfo.first_name || 'Unknown'})`);
         
-        // Notify admin about new registration
-        bot.sendMessage(ADMIN_ID,
-            `🔔 **New User Registration**\n\n` +
-            `👤 Name: ${userInfo.first_name || 'Unknown'} ${userInfo.last_name || ''}\n` +
-            `🆔 User ID: ${userId}\n` +
-            `👨‍💻 Username: @${userInfo.username || 'No username'}\n\n` +
-            `Use /users to manage users.`,
-            { parse_mode: 'Markdown' }
-        ).catch(() => console.log('Could not notify admin'));
+        // Check if database is ready
+        if (!usersCollection) {
+            bot.sendMessage(msg.chat.id, 
+                "⚠️ **System Initializing**\n\nPlease wait a moment and try again.",
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
         
-        return;
-    }
-    
-    const welcomeMessage = `
+        // Register user in database
+        const registeredUser = await registerUser(userId, userInfo);
+        
+        if (!registeredUser) {
+            bot.sendMessage(msg.chat.id, 
+                "❌ **Registration Failed**\n\nThere was an error registering your account. Please try again later.",
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+        
+        const isActivated = await isUserActivated(userId);
+        
+        if (!isActivated) {
+            bot.sendMessage(msg.chat.id, 
+                "🤖 **Welcome to Dayaka Sabawa Bot!**\n\n" +
+                "📝 Your account has been registered successfully!\n" +
+                "⏳ Please wait for admin approval to start using the bot.\n\n" +
+                "🚫 **Access Status:** Pending Activation\n\n" +
+                "The administrator will be notified of your registration.",
+                { parse_mode: 'Markdown' }
+            );
+            
+            // Notify admin about new registration
+            try {
+                await bot.sendMessage(ADMIN_ID,
+                    `🔔 **New User Registration**\n\n` +
+                    `👤 Name: ${userInfo.first_name || 'Unknown'} ${userInfo.last_name || ''}\n` +
+                    `🆔 User ID: ${userId}\n` +
+                    `👨‍💻 Username: @${userInfo.username || 'No username'}\n` +
+                    `📅 Registered: ${new Date().toLocaleString()}\n\n` +
+                    `Use /users to manage users.`,
+                    { parse_mode: 'Markdown' }
+                );
+            } catch (adminNotifyError) {
+                console.log('Could not notify admin:', adminNotifyError.message);
+            }
+            
+            return;
+        }
+        
+        const welcomeMessage = `
 🎬 **Welcome to Dayaka Sabawa Bot!**
 
 ✅ **Account Status:** Activated
@@ -335,9 +432,17 @@ ${userId === ADMIN_ID ? `
 ` : ''}
 
 Ready to search for videos! 🚀
-    `;
-    
-    bot.sendMessage(msg.chat.id, welcomeMessage, { parse_mode: 'Markdown' });
+        `;
+        
+        bot.sendMessage(msg.chat.id, welcomeMessage, { parse_mode: 'Markdown' });
+        
+    } catch (error) {
+        console.error('Start command error:', error);
+        bot.sendMessage(msg.chat.id, 
+            "❌ **System Error**\n\nAn unexpected error occurred. Please try again later.",
+            { parse_mode: 'Markdown' }
+        );
+    }
 });
 
 // Users command (Admin only)
@@ -349,16 +454,17 @@ bot.onText(/\/users/, async (msg) => {
         return;
     }
     
-    const users = await getAllUsers();
-    
-    if (users.length === 0) {
-        bot.sendMessage(msg.chat.id, "📭 No users found.");
-        return;
-    }
-    
-    const keyboard = createUserManagementKeyboard(users, 0);
-    
-    const message = `
+    try {
+        const users = await getAllUsers();
+        
+        if (users.length === 0) {
+            bot.sendMessage(msg.chat.id, "📭 No users found.");
+            return;
+        }
+        
+        const keyboard = createUserManagementKeyboard(users, 0);
+        
+        const message = `
 👥 **User Management**
 
 Total Users: ${users.length}
@@ -366,12 +472,17 @@ Activated: ${users.filter(u => u.isActivated).length}
 Pending: ${users.filter(u => !u.isActivated).length}
 
 Select a user to activate/deactivate:
-    `;
-    
-    bot.sendMessage(msg.chat.id, message, {
-        parse_mode: 'Markdown',
-        reply_markup: keyboard
-    });
+        `;
+        
+        bot.sendMessage(msg.chat.id, message, {
+            parse_mode: 'Markdown',
+            reply_markup: keyboard
+        });
+        
+    } catch (error) {
+        console.error('Users command error:', error);
+        bot.sendMessage(msg.chat.id, "❌ Error retrieving users.");
+    }
 });
 
 // Search command
@@ -462,7 +573,7 @@ bot.onText(/\/download (.+)/, async (msg, match) => {
     }
 });
 
-// Process video download
+// Process video download with enhanced error handling
 async function processVideoDownload(chatId, messageId, details) {
     try {
         const fileSize = details.sizeB || 0;
@@ -521,8 +632,18 @@ async function processVideoDownload(chatId, messageId, details) {
         }
         
         // Clean up file
-        fs.unlinkSync(filepath);
-        bot.deleteMessage(chatId, messageId).catch(() => {});
+        try {
+            fs.unlinkSync(filepath);
+        } catch (cleanupError) {
+            console.log('File cleanup error:', cleanupError.message);
+        }
+        
+        // Delete processing message
+        try {
+            await bot.deleteMessage(chatId, messageId);
+        } catch (deleteError) {
+            console.log('Could not delete message:', deleteError.message);
+        }
         
     } catch (error) {
         console.error('Download processing error:', error);
@@ -581,6 +702,11 @@ bot.onText(/\/stats/, async (msg) => {
     }
     
     try {
+        if (!usersCollection) {
+            bot.sendMessage(msg.chat.id, "❌ Database not ready.");
+            return;
+        }
+        
         const totalUsers = await usersCollection.countDocuments({});
         const activatedUsers = await usersCollection.countDocuments({ isActivated: true });
         const pendingUsers = totalUsers - activatedUsers;
@@ -600,6 +726,7 @@ bot.onText(/\/stats/, async (msg) => {
 💾 **System:**
 • Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB
 • Uptime: ${Math.round(process.uptime() / 3600)}h
+• Database: ${db ? '✅ Connected' : '❌ Disconnected'}
         `;
         
         bot.sendMessage(msg.chat.id, statsMessage, { parse_mode: 'Markdown' });
@@ -658,7 +785,7 @@ bot.onText(/\/announce (.+)/, async (msg, match) => {
     }
 });
 
-// Callback query handler
+// Callback query handler (same as before, no changes needed)
 bot.on('callback_query', async (query) => {
     const userId = query.from.id.toString();
     const data = query.data;
@@ -871,10 +998,10 @@ Choose an action:
             
             const userKeyboard = {
                 inline_keyboard: [
-                    [{
+                    ...(user.userId !== ADMIN_ID ? [[{
                         text: user.isActivated ? "🚫 Deactivate" : "✅ Activate",
                         callback_data: user.isActivated ? `deactivate_${targetUserId}` : `activate_${targetUserId}`
-                    }],
+                    }]] : []),
                     [{
                         text: "⬅️ Back to Users",
                         callback_data: "back_to_users"
@@ -901,6 +1028,15 @@ Choose an action:
             const isActivating = data.startsWith('activate_');
             const targetUserId = data.split('_')[1];
             
+            // Don't allow deactivating admin
+            if (!isActivating && targetUserId === ADMIN_ID) {
+                bot.answerCallbackQuery(query.id, { 
+                    text: "Cannot deactivate admin account!",
+                    show_alert: true 
+                });
+                return;
+            }
+            
             try {
                 let success;
                 if (isActivating) {
@@ -923,8 +1059,11 @@ Choose an action:
                         ? "🎉 **Account Activated!**\n\nYour account has been activated! You can now use all bot features.\n\nUse /start to begin!"
                         : "⚠️ **Access Revoked**\n\nYour access to this bot has been revoked by the administrator.";
                     
-                    bot.sendMessage(targetUserId, notificationMessage, { parse_mode: 'Markdown' })
-                        .catch(() => console.log(`Could not notify user ${targetUserId}`));
+                    try {
+                        await bot.sendMessage(targetUserId, notificationMessage, { parse_mode: 'Markdown' });
+                    } catch (notifyError) {
+                        console.log(`Could not notify user ${targetUserId}:`, notifyError.message);
+                    }
                     
                     // Update the message to show new status
                     const user = await usersCollection.findOne({ userId: targetUserId });
@@ -948,10 +1087,10 @@ Choose an action:
                     
                     const updatedKeyboard = {
                         inline_keyboard: [
-                            [{
+                            ...(user.userId !== ADMIN_ID ? [[{
                                 text: user.isActivated ? "🚫 Deactivate" : "✅ Activate",
                                 callback_data: user.isActivated ? `deactivate_${targetUserId}` : `activate_${targetUserId}`
-                            }],
+                            }]] : []),
                             [{
                                 text: "⬅️ Back to Users",
                                 callback_data: "back_to_users"
@@ -1050,53 +1189,71 @@ Select a user to activate/deactivate:
     }
 });
 
-// Handle unauthorized access
+// Handle unauthorized access with improved logic
 bot.on('message', async (msg) => {
     const userId = msg.from.id.toString();
     
     // Skip if it's a command that was already handled
     if (msg.text && msg.text.startsWith('/')) return;
     
-    // Check if user is registered and activated
-    const isActivated = await isUserActivated(userId);
-    
-    if (!isActivated) {
-        // Check if user is registered
-        const user = await usersCollection.findOne({ userId: userId });
-        
-        if (!user) {
-            // User not registered
-            bot.sendMessage(msg.chat.id,
-                "🤖 **Welcome!**\n\n" +
-                "Please use /start to register and get access to the bot.",
-                { parse_mode: 'Markdown' }
-            );
-        } else {
-            // User registered but not activated
-            bot.sendMessage(msg.chat.id,
-                "⏳ **Waiting for Activation**\n\n" +
-                "Your account is registered but waiting for admin approval.\n" +
-                "Please contact the administrator for activation.",
-                {
-                    parse_mode: 'Markdown',
-                    reply_markup: {
-                        inline_keyboard: [[
-                            { text: "👨‍💻 Contact Admin", url: `tg://user?id=${ADMIN_ID}` }
-                        ]]
-                    }
-                }
+    try {
+        // Update user activity
+        if (usersCollection) {
+            await usersCollection.updateOne(
+                { userId: userId },
+                { $set: { lastActiveAt: new Date() } }
             );
         }
+        
+        // Check if user is registered and activated
+        const isActivated = await isUserActivated(userId);
+        
+        if (!isActivated) {
+            // Check if user is registered
+            const user = usersCollection ? await usersCollection.findOne({ userId: userId }) : null;
+            
+            if (!user) {
+                // User not registered
+                bot.sendMessage(msg.chat.id,
+                    "🤖 **Welcome!**\n\n" +
+                    "Please use /start to register and get access to the bot.",
+                    { parse_mode: 'Markdown' }
+                );
+            } else {
+                // User registered but not activated
+                bot.sendMessage(msg.chat.id,
+                    "⏳ **Waiting for Activation**\n\n" +
+                    "Your account is registered but waiting for admin approval.\n" +
+                    "Please contact the administrator for activation.",
+                    {
+                        parse_mode: 'Markdown',
+                        reply_markup: {
+                            inline_keyboard: [[
+                                { text: "👨‍💻 Contact Admin", url: `tg://user?id=${ADMIN_ID}` }
+                            ]]
+                        }
+                    }
+                );
+            }
+        }
+    } catch (error) {
+        console.error('Message handler error:', error);
     }
 });
 
-// Error handling
+// Enhanced error handling
 bot.on('error', (error) => {
     console.error('Bot error:', error);
 });
 
 bot.on('polling_error', (error) => {
     console.error('Polling error:', error);
+    
+    // Try to restart polling after a delay
+    setTimeout(() => {
+        console.log('Attempting to restart polling...');
+        bot.startPolling();
+    }, 5000);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -1105,33 +1262,88 @@ process.on('unhandledRejection', (reason, promise) => {
 
 process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    process.exit(1);
+    // Graceful shutdown
+    gracefulShutdown();
 });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('Received SIGINT. Graceful shutdown...');
-    bot.stopPolling();
-    process.exit(0);
-});
+// Graceful shutdown function
+async function gracefulShutdown() {
+    console.log('Graceful shutdown initiated...');
+    
+    try {
+        // Stop bot polling
+        bot.stopPolling();
+        console.log('✅ Bot polling stopped');
+        
+        // Close MongoDB connection
+        if (client) {
+            await client.close();
+            console.log('✅ MongoDB connection closed');
+        }
+        
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during shutdown:', error);
+        process.exit(1);
+    }
+}
 
-process.on('SIGTERM', () => {
-    console.log('Received SIGTERM. Graceful shutdown...');
-    bot.stopPolling();
-    process.exit(0);
-});
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
+
+// Database connection retry mechanism
+async function connectWithRetry() {
+    const maxRetries = 5;
+    let retryCount = 0;
+    
+    while (retryCount < maxRetries) {
+        const connected = await initMongoDB();
+        if (connected) {
+            return true;
+        }
+        
+        retryCount++;
+        console.log(`❌ Database connection failed. Retry ${retryCount}/${maxRetries} in 10 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 10000));
+    }
+    
+    console.error('❌ Failed to connect to database after multiple attempts');
+    return false;
+}
 
 // Initialize and start bot
 async function startBot() {
     try {
-        await initMongoDB();
+        console.log('🚀 Starting XVideo Bot...');
+        
+        // Connect to database with retry mechanism
+        const dbConnected = await connectWithRetry();
+        if (!dbConnected) {
+            console.error('❌ Cannot start bot without database connection');
+            process.exit(1);
+        }
+        
         console.log('🤖 XVideo Bot is running...');
         console.log(`👨‍💻 Admin ID: ${ADMIN_ID}`);
         
         // Get initial user count
-        const totalUsers = await usersCollection.countDocuments({});
-        const activatedUsers = await usersCollection.countDocuments({ isActivated: true });
-        console.log(`👥 Total users: ${totalUsers} (${activatedUsers} activated)`);
+        if (usersCollection) {
+            const totalUsers = await usersCollection.countDocuments({});
+            const activatedUsers = await usersCollection.countDocuments({ isActivated: true });
+            console.log(`👥 Total users: ${totalUsers} (${activatedUsers} activated)`);
+        }
+        
+        // Send startup notification to admin
+        try {
+            await bot.sendMessage(ADMIN_ID, 
+                "🚀 **Bot Started Successfully!**\n\n" +
+                `📅 Started at: ${new Date().toLocaleString()}\n` +
+                "🔧 All systems operational",
+                { parse_mode: 'Markdown' }
+            );
+        } catch (adminNotifyError) {
+            console.log('Could not notify admin of startup:', adminNotifyError.message);
+        }
         
     } catch (error) {
         console.error('Failed to start bot:', error);
@@ -1139,4 +1351,16 @@ async function startBot() {
     }
 }
 
+// Health check function (optional - for monitoring)
+function healthCheck() {
+    return {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        database: db ? 'connected' : 'disconnected',
+        memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB',
+        uptime: Math.round(process.uptime()) + 's'
+    };
+}
+
+// Start the bot
 startBot();
